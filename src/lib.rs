@@ -11,7 +11,7 @@ pub mod async_std;
 
 #[cfg(any(feature = "async-std", feature = "tokio"))]
 /// Abstract over all runtimes
-pub mod lib_async;
+pub mod nonblocking;
 
 use std::{
     fs::File,
