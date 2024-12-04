@@ -19,10 +19,10 @@ impl Connection<UnixStream> {
     }
 }
 
-impl Connection<UnixStream> {
+impl Connection<TcpStream> {
     /// Tries connecting to ClamAV via TCP
-    pub async fn try_connect_tcp<P: AsRef<Path>>(path: P) -> Result<Self, std::io::Error> {
-        let stream = UnixStream::connect(path).await?;
+    pub async fn try_connect_tcp<A: AsyncToSocketAddrs>(path: A) -> Result<Self, std::io::Error> {
+        let stream = TcpStream::connect(path).await?;
         Ok(Self(stream))
     }
 }
