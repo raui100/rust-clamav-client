@@ -1,4 +1,5 @@
 use async_fs::File;
+use async_net::{AsyncToSocketAddrs, TcpStream};
 use futures_lite::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Stream, StreamExt};
 use std::path::Path;
 
@@ -7,7 +8,14 @@ use async_net::unix::UnixStream;
 
 use super::{IoResult, DEFAULT_CHUNK_SIZE, END_OF_STREAM, INSTREAM, PING, PONG, SHUTDOWN, VERSION};
 
+#[cfg(unix)]
+/// Connection to ClamAV via Unix socket
+pub type SocketConnection = Connection<UnixStream>;
+/// Connection to ClamAV via Tcp
+pub type TcpConnection = Connection<TcpStream>;
+
 /// Connection to ClamAV
+#[derive(Debug, Clone)]
 pub struct Connection<S: AsyncRead + AsyncWrite + Unpin>(pub S);
 
 #[cfg(unix)]
