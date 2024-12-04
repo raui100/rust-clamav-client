@@ -29,7 +29,7 @@ tokio-util = { version = "0.7.10", features = ["io"] }
 async-std = { version = "1.12.0", features = ["attributes"] }
 
 [features]
-tokio = ["dep:async-trait", "dep:tokio"]
+tokio = ["dep:async-trait", "dep:tokio", "dep:bytes"]
 tokio-stream = ["tokio", "dep:tokio-stream", "dep:bytes"]
 async-std = ["dep:async-trait", "dep:async-std", "dep:bytes"]
 
