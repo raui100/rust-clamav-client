@@ -9,6 +9,10 @@ pub mod tokio;
 /// Use the feature flag "async-std" to enable this module
 pub mod async_std;
 
+#[cfg(any(feature = "async-std", feature = "tokio"))]
+/// Abstract over all runtimes
+pub mod lib_async;
+
 use std::{
     fs::File,
     io::{self, Error, Read, Write},
