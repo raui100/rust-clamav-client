@@ -1,97 +1,17 @@
 use async_std::{
-    fs::File,
     io::{self, ReadExt, WriteExt},
     net::{TcpStream, ToSocketAddrs},
     path::Path,
-    stream::{Stream, StreamExt},
+    stream::Stream,
 };
 use async_trait::async_trait;
 
 #[cfg(unix)]
 use async_std::os::unix::net::UnixStream;
 
-use super::{IoResult, DEFAULT_CHUNK_SIZE, END_OF_STREAM, INSTREAM, PING, PONG, SHUTDOWN, VERSION};
+use crate::nonblocking::Connection;
 
-async fn send_command<RW: ReadExt + WriteExt + Unpin>(
-    mut stream: RW,
-    command: &[u8],
-    expected_response_length: Option<usize>,
-) -> IoResult {
-    stream.write_all(command).await?;
-    stream.flush().await?;
-
-    let mut response = match expected_response_length {
-        Some(len) => Vec::with_capacity(len),
-        None => Vec::new(),
-    };
-
-    stream.read_to_end(&mut response).await?;
-    Ok(response)
-}
-
-async fn scan<R: ReadExt + Unpin, RW: ReadExt + WriteExt + Unpin>(
-    mut input: R,
-    chunk_size: Option<usize>,
-    mut stream: RW,
-) -> IoResult {
-    stream.write_all(INSTREAM).await?;
-
-    let chunk_size = chunk_size
-        .unwrap_or(DEFAULT_CHUNK_SIZE)
-        .min(u32::MAX as usize);
-
-    let mut buffer = vec![0; chunk_size];
-
-    loop {
-        let len = input.read(&mut buffer[..]).await?;
-        if len != 0 {
-            stream.write_all(&(len as u32).to_be_bytes()).await?;
-            stream.write_all(&buffer[..len]).await?;
-        } else {
-            stream.write_all(END_OF_STREAM).await?;
-            stream.flush().await?;
-            break;
-        }
-    }
-
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).await?;
-    Ok(response)
-}
-
-async fn _scan_stream<
-    S: Stream<Item = Result<bytes::Bytes, std::io::Error>>,
-    RW: ReadExt + WriteExt + Unpin,
->(
-    input_stream: S,
-    chunk_size: Option<usize>,
-    mut output_stream: RW,
-) -> IoResult {
-    output_stream.write_all(INSTREAM).await?;
-
-    let chunk_size = chunk_size
-        .unwrap_or(DEFAULT_CHUNK_SIZE)
-        .min(u32::MAX as usize);
-
-    let mut input_stream = std::pin::pin!(input_stream);
-
-    while let Some(bytes) = input_stream.next().await {
-        let bytes = bytes?;
-        let bytes = bytes.as_ref();
-        for chunk in bytes.chunks(chunk_size) {
-            let len = chunk.len();
-            output_stream.write_all(&(len as u32).to_be_bytes()).await?;
-            output_stream.write_all(chunk).await?;
-        }
-    }
-
-    output_stream.write_all(END_OF_STREAM).await?;
-    output_stream.flush().await?;
-
-    let mut response = Vec::new();
-    output_stream.read_to_end(&mut response).await?;
-    Ok(response)
-}
+use super::IoResult;
 
 /// Use a TCP connection to communicate with a ClamAV server
 #[derive(Copy, Clone)]
@@ -166,7 +86,7 @@ impl<P: AsRef<Path>> TransportProtocol for Socket<P> {
 ///
 pub async fn ping<T: TransportProtocol>(connection: T) -> IoResult {
     let stream = connection.connect().await?;
-    send_command(stream, PING, Some(PONG.len())).await
+    Connection(stream).ping().await
 }
 
 /// Gets the version number from ClamAV
@@ -196,7 +116,7 @@ pub async fn ping<T: TransportProtocol>(connection: T) -> IoResult {
 ///
 pub async fn get_version<T: TransportProtocol>(connection: T) -> IoResult {
     let stream = connection.connect().await?;
-    send_command(stream, VERSION, None).await
+    Connection(stream).get_version().await
 }
 
 /// Scans a file for viruses
@@ -219,9 +139,9 @@ pub async fn scan_file<P: AsRef<Path>, T: TransportProtocol>(
     connection: T,
     chunk_size: Option<usize>,
 ) -> IoResult {
-    let file = File::open(file_path).await?;
     let stream = connection.connect().await?;
-    scan(file, chunk_size, stream).await
+    let path: &std::path::Path = file_path.as_ref().into();
+    Connection(stream).scan_file(path, chunk_size).await
 }
 
 /// Scans a data buffer for viruses
@@ -244,7 +164,7 @@ pub async fn scan_buffer<T: TransportProtocol>(
     chunk_size: Option<usize>,
 ) -> IoResult {
     let stream = connection.connect().await?;
-    scan(buffer, chunk_size, stream).await
+    Connection(stream).scan(buffer, chunk_size).await
 }
 
 /// Scans a stream for viruses
@@ -270,7 +190,7 @@ pub async fn scan_stream<
     chunk_size: Option<usize>,
 ) -> IoResult {
     let output_stream = connection.connect().await?;
-    _scan_stream(input_stream, chunk_size, output_stream).await
+    crate::nonblocking::scan_stream(input_stream, chunk_size, output_stream).await
 }
 
 /// Shuts down a ClamAV server
@@ -289,5 +209,5 @@ pub async fn scan_stream<
 ///
 pub async fn shutdown<T: TransportProtocol>(connection: T) -> IoResult {
     let stream = connection.connect().await?;
-    send_command(stream, SHUTDOWN, None).await
+    Connection(stream).shutdown().await
 }
