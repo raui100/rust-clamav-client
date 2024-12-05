@@ -1,81 +1,169 @@
 use async_fs::File;
-use async_net::{AsyncToSocketAddrs, TcpStream};
+use async_net::TcpStream;
 use futures_lite::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Stream, StreamExt};
 use std::path::Path;
 
 #[cfg(unix)]
 use async_net::unix::UnixStream;
 
-use super::{IoResult, DEFAULT_CHUNK_SIZE, END_OF_STREAM, INSTREAM, PING, PONG, SHUTDOWN, VERSION};
+use crate::{Socket, Tcp};
 
-#[cfg(unix)]
-/// Connection to ClamAV via Unix socket
-pub type SocketConnection = Connection<UnixStream>;
-/// Connection to ClamAV via Tcp
-pub type TcpConnection = Connection<TcpStream>;
+use super::{IoResult, DEFAULT_CHUNK_SIZE, END_OF_STREAM, INSTREAM, PING, SHUTDOWN, VERSION};
 
-/// Connection to ClamAV
-#[derive(Debug, Clone)]
-pub struct Connection<S: AsyncRead + AsyncWrite + Unpin>(pub S);
-
-#[cfg(unix)]
-impl Connection<UnixStream> {
-    /// Tries connecting to ClamAV via Unix socket
-    pub async fn try_connect_socket<P: AsRef<Path>>(path: P) -> Result<Self, std::io::Error> {
-        let stream = UnixStream::connect(path).await?;
-        Ok(Self(stream))
+impl ClamAvAsync for Tcp {
+    type Stream = TcpStream;
+    fn connect(&self) -> impl std::future::Future<Output = std::io::Result<TcpStream>> + Send {
+        TcpStream::connect(&self.0)
     }
 }
 
-impl Connection<TcpStream> {
-    /// Tries connecting to ClamAV via TCP
-    pub async fn try_connect_tcp<A: AsyncToSocketAddrs>(path: A) -> Result<Self, std::io::Error> {
-        let stream = TcpStream::connect(path).await?;
-        Ok(Self(stream))
+#[cfg(unix)]
+impl ClamAvAsync for Socket {
+    type Stream = UnixStream;
+
+    fn connect(&self) -> impl std::future::Future<Output = std::io::Result<Self::Stream>> + Send {
+        UnixStream::connect(&self.0)
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
-    /// Sends a ping command to ClamAV
-    pub async fn ping(&mut self) -> IoResult {
-        send_command(&mut self.0, PING, Some(PONG.len())).await
+/// Sending commands and scanning data with ClamAV
+pub trait ClamAvAsync: Send + Sync {
+    /// Bidirectional stream for communicating with ClamAV
+    type Stream: AsyncRead + AsyncWrite + Unpin + Send;
+    /// Connecting to the ClamAV instance
+    fn connect(&self) -> impl std::future::Future<Output = std::io::Result<Self::Stream>> + Send;
+
+    /// Sends a ping request to ClamAV
+    ///
+    /// This function establishes a connection to a ClamAV server and sends the PING
+    /// command to it. If the server is available, it responds with [`PONG`].
+    ///
+    /// # Arguments
+    ///
+    /// * `connection`: The connection type to use - either TCP or a Unix socket connection
+    ///
+    /// # Returns
+    ///
+    /// An [`IoResult`] containing the server's response as a vector of bytes
+    fn ping(&self) -> impl std::future::Future<Output = IoResult> + Send {
+        async {
+            let stream = self.connect().await?;
+            send_command(stream, PING).await
+        }
     }
 
     /// Gets the version number from ClamAV
-    pub async fn get_version(&mut self) -> IoResult {
-        send_command(&mut self.0, VERSION, None).await
+    ///
+    /// This function establishes a connection to a ClamAV server and sends the
+    /// VERSION command to it. If the server is available, it responds with its
+    /// version number.
+    ///
+    /// # Arguments
+    ///
+    /// * `connection`: The connection type to use - either TCP or a Unix socket connection
+    ///
+    /// # Returns
+    ///
+    /// An [`IoResult`] containing the server's response as a vector of bytes
+    fn get_version(&self) -> impl std::future::Future<Output = IoResult> + Send {
+        async {
+            let stream = self.connect().await?;
+            send_command(stream, VERSION).await
+        }
+    }
+
+    /// Scans a file for viruses
+    ///
+    /// This function reads data from a file located at the specified `file_path`
+    /// and streams it to a ClamAV server for scanning.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path`: The path to the file to be scanned
+    /// * `connection`: The connection type to use - either TCP or a Unix socket connection
+    /// * `chunk_size`: An optional chunk size for reading data. If [`None`], a default chunk size is used
+    ///
+    /// # Returns
+    ///
+    /// An [`IoResult`] containing the server's response as a vector of bytes
+    fn scan_file<P: AsRef<Path> + Send>(
+        &self,
+        file_path: P,
+        chunk_size: Option<usize>,
+    ) -> impl std::future::Future<Output = IoResult> + Send {
+        async move {
+            let file = File::open(file_path).await?;
+            let stream = self.connect().await?;
+            scan(file, chunk_size, stream).await
+        }
+    }
+
+    /// Scans a data buffer for viruses
+    ///
+    /// This function streams the provided `buffer` data to a ClamAV server
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer`: The data to be scanned
+    /// * `connection`: The connection type to use - either TCP or a Unix socket connection
+    /// * `chunk_size`: An optional chunk size for reading data. If [`None`], a default chunk size is used
+    ///
+    /// # Returns
+    ///
+    /// An [`IoResult`] containing the server's response as a vector of bytes
+    fn scan_buffer(
+        &self,
+        buffer: &[u8],
+        chunk_size: Option<usize>,
+    ) -> impl std::future::Future<Output = IoResult> + Send {
+        async move {
+            let stream = self.connect().await?;
+            scan(buffer, chunk_size, stream).await
+        }
+    }
+
+    /// Scans a stream for viruses
+    ///
+    /// This function sends the provided stream to a ClamAV server for scanning.
+    ///
+    /// # Arguments
+    ///
+    /// * `input_stream`: The stream to be scanned
+    /// * `connection`: The connection type to use - either TCP or a Unix socket connection
+    /// * `chunk_size`: An optional chunk size for reading data. If [`None`], a default chunk size is used
+    ///
+    /// # Returns
+    ///
+    /// An [`IoResult`] containing the server's response as a vector of bytes
+    fn scan_stream<S: Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>(
+        &self,
+        input_stream: S,
+        chunk_size: Option<usize>,
+    ) -> impl std::future::Future<Output = IoResult> + Send {
+        async move {
+            let output_stream = self.connect().await?;
+            scan_stream(input_stream, chunk_size, output_stream).await
+        }
     }
 
     /// Shuts down a ClamAV server
-    pub async fn shutdown(&mut self) -> IoResult {
-        send_command(&mut self.0, SHUTDOWN, None).await
-    }
-
-    /// Scanning data with ClamAV
-    pub async fn scan<T: AsyncRead + Unpin>(
-        &mut self,
-        input: T,
-        chunk_size: Option<usize>,
-    ) -> IoResult {
-        scan(input, chunk_size, &mut self.0).await
-    }
-
-    /// Scanning a file with ClamAV
-    pub async fn scan_file<P: AsRef<Path>>(
-        &mut self,
-        file_path: P,
-        chunk_size: Option<usize>,
-    ) -> IoResult {
-        let file = File::open(file_path).await?;
-        self.scan(file, chunk_size).await
-    }
-
-    /// Scanning a stream with ClamAV
-    pub async fn scan_stream<T>(&mut self, stream: T, chunk_size: Option<usize>) -> IoResult
-    where
-        T: Stream<Item = Result<bytes::Bytes, std::io::Error>>,
-    {
-        scan_stream(stream, chunk_size, &mut self.0).await
+    ///
+    /// This function establishes a connection to a ClamAV server and sends the
+    /// SHUTDOWN command to it. If the server is available, it will perform a clean
+    /// exit and shut itself down. The response will be empty.
+    ///
+    /// # Arguments
+    ///
+    /// * `connection`: The connection type to use - either TCP or a Unix socket connection
+    ///
+    /// # Returns
+    ///
+    /// An [`IoResult`] containing the server's response
+    fn shutdown(&self) -> impl std::future::Future<Output = IoResult> + Send {
+        async {
+            let stream = self.connect().await?;
+            send_command(stream, SHUTDOWN).await
+        }
     }
 }
 
@@ -83,16 +171,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 pub async fn send_command<RW: AsyncRead + AsyncWrite + Unpin>(
     mut stream: RW,
     command: &[u8],
-    expected_response_length: Option<usize>,
 ) -> IoResult {
     stream.write_all(command).await?;
-    stream.flush().await?;
+    // stream.flush().await?;
 
-    let mut response = match expected_response_length {
-        Some(len) => Vec::with_capacity(len),
-        None => Vec::new(),
-    };
-
+    let mut response = Vec::new();
     stream.read_to_end(&mut response).await?;
     Ok(response)
 }
